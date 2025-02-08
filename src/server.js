@@ -963,10 +963,16 @@ function registerRoutes(app, apiConfig) {
 
                     const token = jwt.sign(tokenPayload, JWT_SECRET, { expiresIn: JWT_EXPIRY });
 
+                    const userData = {};
+
+                    allowRead.forEach(field => {
+                        userData[field] = user[field];
+                    });
+
                     res.json({
                         message: "Authentication successful",
                         token,
-                        user: username,
+                        user: tokenPayload,
                     });
                 } catch (error) {
                     console.error(`Error in POST ${route}:`, error.message);
