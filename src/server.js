@@ -989,7 +989,7 @@ function registerRoutes(app, apiConfig) {
                   route,
                   query: req.query,
                 });
-          
+  
                 const connection = await getDbConnection(endpoint);
                 if (!connection) {
                   console.error(
@@ -999,7 +999,7 @@ function registerRoutes(app, apiConfig) {
                     .status(500)
                     .json({ error: `Database connection failed for ${endpoint.dbConnection}` });
                 }
-          
+  
                 // Sanitize and validate query parameters
                 const sanitizedQuery = Object.fromEntries(
                   Object.entries(req.query).map(([key, value]) => [
@@ -1007,7 +1007,7 @@ function registerRoutes(app, apiConfig) {
                     value.replace(/^['"]|['"]$/g, ""),
                   ])
                 );
-          
+  
                 // Extract pagination parameters with defaults
                 const limit = parseInt(sanitizedQuery.limit, 10) || 20;
                 const offset = parseInt(sanitizedQuery.offset, 10) || 0;
@@ -1017,16 +1017,39 @@ function registerRoutes(app, apiConfig) {
                     .status(400)
                     .json({ error: "Limit and offset must be non-negative integers" });
                 }
-          
+  
                 // Check for keys and build WHERE clause dynamically
                 const queryKeys = endpoint.keys
                   ? endpoint.keys.filter((key) => sanitizedQuery[key] !== undefined)
                   : Object.keys(sanitizedQuery); // Use all query params if keys are not defined
+  
+                // ADDED: Apply ownership check HERE!
+  
+                let ownershipWhereClause = '';
+                let ownershipParams = [];
+  
+                if (endpoint.owner) {
+                    const user = req.user; // From JWT
+                    if (user) {
+                        ownershipWhereClause = ` ${queryKeys.length > 0 ? 'AND' : ''} ${endpoint.dbTable}.${endpoint.owner.column} = ?`;
+                        ownershipParams = [user[endpoint.owner.tokenField]];
+                        console.log("Ownership Check: ", {
+                            column: endpoint.owner.column,
+                            tokenField: endpoint.owner.tokenField,
+                            tokenValue: user[endpoint.owner.tokenField]
+                        });
+                    }
+                }
+  
                 const whereClause = queryKeys
                   .map((key) => `${endpoint.dbTable}.${key} = ?`)
                   .join(" AND ");
-                const params = queryKeys.map((key) => sanitizedQuery[key]);
-          
+  
+                // Changed to concat ownership check
+                const whereClauseString = whereClause ? `WHERE ${whereClause}${ownershipWhereClause}` : ownershipWhereClause ? `WHERE ${ownershipWhereClause}` : "";
+                const params = queryKeys.map((key) => sanitizedQuery[key]).concat(ownershipParams); // Changed param setup
+                console.log("Generated params: ", params);
+  
                 // Validate fields to select
                 const requestedFields = sanitizedQuery.fields
                   ? sanitizedQuery.fields.split(",").filter((field) =>
@@ -1037,11 +1060,11 @@ function registerRoutes(app, apiConfig) {
                   console.error("No valid fields requested:", sanitizedQuery.fields);
                   return res.status(400).json({ error: "No valid fields requested" });
                 }
-          
+  
                 const fields = requestedFields
                   .map((field) => `${endpoint.dbTable}.${field}`)
                   .join(", ");
-          
+  
                 // Process relationships
                 let joinClause = "";
                 let relatedFields = "";
@@ -1051,11 +1074,10 @@ function registerRoutes(app, apiConfig) {
                     relatedFields += `, ${rel.fields.map((field) => `${rel.relatedTable}.${field}`).join(", ")}`;
                   });
                 }
-          
+  
                 const queryFields = `${fields}${relatedFields}`;
-          
+  
                 // Generate the SQL query and cache key
-                const whereClauseString = whereClause ? `WHERE ${whereClause}` : "";
                 const dataQuery = `
                               SELECT ${queryFields}
                               FROM ${endpoint.dbTable}
@@ -1069,8 +1091,10 @@ function registerRoutes(app, apiConfig) {
                               ${joinClause}
                               ${whereClauseString}
                           `;
+  
+                console.log('Generated Query:', dataQuery);
                 const cacheKey = `cache:${route}:${JSON.stringify(req.query)}`;
-          
+  
                 // Caching logic
                 if (endpoint.cache === 1) {
                   const cachedData = await redis.get(cacheKey);
@@ -1079,9 +1103,9 @@ function registerRoutes(app, apiConfig) {
                     return res.json(JSON.parse(cachedData));
                   }
                 }
-          
+  
                 console.log("Cache miss or cache disabled. Executing queries.");
-          
+  
                 let totalCount = 0;
                 if (whereClauseString.trim() === "") {
                   try {
@@ -1121,10 +1145,10 @@ function registerRoutes(app, apiConfig) {
                   const [countResult] = await connection.execute(countQuery, params);
                   totalCount = countResult[0]?.totalCount || 0;
                 }
-          
+  
                 // Execute the data query
                 const [results] = await connection.execute(dataQuery, params);
-          
+  
                 // Prepare the response
                 const response = {
                   data: results,
@@ -1135,13 +1159,13 @@ function registerRoutes(app, apiConfig) {
                     totalPages: Math.ceil(totalCount / limit),
                   },
                 };
-          
+  
                 // Cache the response if caching is enabled
                 if (endpoint.cache === 1) {
                   console.log("Caching response for key:", cacheKey);
                   await redis.set(cacheKey, JSON.stringify(response), "EX", 300); // Cache for 5 minutes
                 }
-          
+  
                 // Send the response
                 res.json(response);
               } catch (error) {
